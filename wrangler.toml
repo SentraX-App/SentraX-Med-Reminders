@@ -1,10 +1,7 @@
 name = "sentrax-med-reminders"
 main = "index.js"
 compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
 
-# Fires the reminder check every 2 minutes -- Cloudflare's Cron Triggers
-# support down to 1-minute resolution and run reliably on schedule, unlike
-# GitHub Actions' free-tier cron (which this replaces: no GitHub Actions
-# workflow is needed for this feature at all).
 [triggers]
 crons = ["*/2 * * * *"]
