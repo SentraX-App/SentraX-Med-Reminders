@@ -30,9 +30,16 @@ export default {
   },
   // Lets you trigger a run manually by visiting the Worker's URL, to test
   // before trusting the Cron Trigger -- harmless to leave in production.
+  // Prints the real error text right in the browser on failure, so there's
+  // no need to dig through Cloudflare's Observability dashboard to see
+  // what went wrong -- just visit the link.
   async fetch(request, env, ctx) {
-    await run(env);
-    return new Response('Reminder check complete.');
+    try {
+      const summary = await run(env);
+      return new Response('OK -- reminder check complete.\n' + summary, { status: 200 });
+    } catch (err) {
+      return new Response('FAILED: ' + (err && err.stack ? err.stack : String(err)), { status: 500 });
+    }
   }
 };
 
@@ -47,19 +54,29 @@ async function run(env) {
   };
 
   const users = await listUsers(accessToken, projectId);
-  console.log('Scanning', users.length, 'users for due medication reminders...');
+  const lines = ['Users scanned: ' + users.length];
+  let pushed = 0, errors = 0;
   for (const doc of users) {
     try {
-      await checkUser(doc, accessToken, vapid);
+      const outcome = await checkUser(doc, accessToken, vapid);
+      if (outcome) lines.push('- ' + doc.name.split('/').pop() + ': ' + outcome);
+      if (outcome && outcome.indexOf('pushed') === 0) pushed++;
     } catch (err) {
-      console.error('Error checking user', doc.name, err);
+      errors++;
+      lines.push('- ' + doc.name.split('/').pop() + ': ERROR -- ' + (err && err.message ? err.message : String(err)));
     }
   }
+  lines.push('Pushes sent: ' + pushed + ' | Per-user errors: ' + errors);
+  return lines.join('\n');
 }
 
+// Returns a short status string for this user (or undefined for the
+// common, silent case of "nothing due right now" -- that's not worth a
+// line every single run). Throwing here is reserved for genuine failures;
+// everything else is reported back for the fetch handler to display.
 async function checkUser(doc, accessToken, vapid) {
   const data = decodeFields(doc.fields || {});
-  if (!data.pushSubscription) return; // nothing to push to
+  if (!data.pushSubscription) return 'no push subscription saved';
 
   const today = localDateStrNigeria();
   const nowMin = nowMinutesNigeria();
@@ -80,20 +97,22 @@ async function checkUser(doc, accessToken, vapid) {
     }
     return timeToMinutes(m.time) <= nowMin;
   });
-  if (due.length === 0) return;
+  if (due.length === 0) return; // nothing due -- the normal, silent case
 
   // Re-fire only when the SET of due meds changes -- same dedup the
   // client's own checkDueMeds() in script.js uses, so a second medication
   // due later the same day still gets its own notification.
   const dueKey = today + ':' + due.map(function (m) { return m.id; }).sort().join(',');
-  if (remindersSent[dueKey]) return;
+  if (remindersSent[dueKey]) return 'already notified for: ' + due.map(function (m) { return m.name; }).join(', ');
 
   const names = due.map(function (m) { return m.name; }).join(', ');
   const ok = await sendPush(vapid, data.pushSubscription, 'Sentra-X reminder', 'Time for: ' + names + '. Mark it taken in the app.');
   if (ok) {
     remindersSent[dueKey] = true;
     await patchUserField(accessToken, doc.name, 'medRemindersSent', remindersSent);
+    return 'pushed: ' + names;
   }
+  return 'push send FAILED for: ' + names + ' (see sendPush error above, or check VAPID keys match)';
 }
 
 async function sendPush(vapid, subscriptionJson, title, body) {
