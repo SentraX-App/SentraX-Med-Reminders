@@ -9,3 +9,8 @@ compatibility_flags = ["nodejs_compat"]
 # workflow is needed for this feature at all).
 [triggers]
 crons = ["*/2 * * * *"]
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+persist = true
