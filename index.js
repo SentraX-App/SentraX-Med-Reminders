@@ -22,7 +22,7 @@
 // caregiver alert is rarely needed" is accurate; "guarantees"/"always" is
 // not, for any reminder app on any platform.
 
-import { ApplicationServer, PushSubscriber } from '@block65/webcrypto-web-push';
+import { buildPushPayload } from '@block65/webcrypto-web-push';
 
 export default {
   async scheduled(event, env, ctx) {
@@ -40,23 +40,24 @@ async function run(env) {
   const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
   const accessToken = await getGoogleAccessToken(serviceAccount);
   const projectId = serviceAccount.project_id;
-  const server = new ApplicationServer({
-    contactInformation: env.VAPID_SUBJECT,
-    vapidKeys: { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY }
-  });
+  const vapid = {
+    subject: env.VAPID_SUBJECT,
+    publicKey: env.VAPID_PUBLIC_KEY,
+    privateKey: env.VAPID_PRIVATE_KEY
+  };
 
   const users = await listUsers(accessToken, projectId);
   console.log('Scanning', users.length, 'users for due medication reminders...');
   for (const doc of users) {
     try {
-      await checkUser(doc, accessToken, server);
+      await checkUser(doc, accessToken, vapid);
     } catch (err) {
       console.error('Error checking user', doc.name, err);
     }
   }
 }
 
-async function checkUser(doc, accessToken, server) {
+async function checkUser(doc, accessToken, vapid) {
   const data = decodeFields(doc.fields || {});
   if (!data.pushSubscription) return; // nothing to push to
 
@@ -88,21 +89,30 @@ async function checkUser(doc, accessToken, server) {
   if (remindersSent[dueKey]) return;
 
   const names = due.map(function (m) { return m.name; }).join(', ');
-  const ok = await sendPush(server, data.pushSubscription, 'Sentra-X reminder', 'Time for: ' + names + '. Mark it taken in the app.');
+  const ok = await sendPush(vapid, data.pushSubscription, 'Sentra-X reminder', 'Time for: ' + names + '. Mark it taken in the app.');
   if (ok) {
     remindersSent[dueKey] = true;
     await patchUserField(accessToken, doc.name, 'medRemindersSent', remindersSent);
   }
 }
 
-async function sendPush(server, subscriptionJson, title, body) {
+async function sendPush(vapid, subscriptionJson, title, body) {
   try {
-    const subscriber = new PushSubscriber(subscriptionJson);
-    await server.sendMessage(subscriber, JSON.stringify({ title: title, body: body }));
+    // buildPushPayload() does the actual VAPID signing (via Web Crypto) and
+    // hands back a ready-to-send {endpoint, method, headers, body} object --
+    // the library itself never makes the network request, so that part is
+    // just a plain fetch() to the subscription's own endpoint.
+    const message = { data: JSON.stringify({ title: title, body: body }), options: { ttl: 60 } };
+    const payload = await buildPushPayload(message, subscriptionJson, vapid);
+    const res = await fetch(subscriptionJson.endpoint, payload);
+    if (!res.ok) {
+      // A 404/410 here means the subscription is dead (uninstalled, cleared
+      // data, etc.) -- not a transient failure, so this doesn't retry it.
+      console.error('Push send failed:', res.status, await res.text().catch(function () { return ''; }));
+      return false;
+    }
     return true;
   } catch (err) {
-    // A 404/410 here means the subscription is dead (uninstalled, cleared
-    // data, etc.) -- not a transient failure, so this doesn't retry it.
     console.error('Push send failed:', err && err.message);
     return false;
   }
