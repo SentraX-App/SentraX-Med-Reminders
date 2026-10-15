@@ -103,9 +103,8 @@ async function checkUser(doc, accessToken, vapid) {
   // client's own checkDueMeds() in script.js uses, so a second medication
   // due later the same day still gets its own notification.
   const dueKey = today + ':' + due.map(function (m) { return m.id; }).sort().join(',');
-  if (remindersSent[dueKey]) return 'already notified for: ' + due.map(function (m) { return m.name; }).join(', ');
-
-  const names = due.map(function (m) { return m.name; }).join(', ');
+  if (remindersSent[dueKey]) return 'already notified for: ' + due.map(function (m) { return m.name + ' (' + m.time + ')'; }).join(', ');
+  const names = due.map(function (m) { return m.name + ' (' + m.time + ')'; }).join(', ');
   const ok = await sendPush(vapid, data.pushSubscription, 'Sentra-X reminder', 'Time for: ' + names + '. Mark it taken in the app.');
   if (ok) {
     remindersSent[dueKey] = true;
